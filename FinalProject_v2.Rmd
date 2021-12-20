@@ -1,0 +1,266 @@
+---
+title: "FinalProject_v2"
+author: "Alec Batts (ajb2305) & Rebecca Noel (rln2119)"
+date: "12/18/2021"
+output: html_document
+---
+
+
+```{r}
+
+for (pkg in c("BiocManager", "data.table", "httr", "FactoMineR", "dendextend", "googledrive", "statmod","xfun")) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    install.packages(pkg)
+  }
+}
+
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("rhdf5")
+install.packages("magrittr")
+install.packages("dplyr")  
+
+library(Seurat)
+library(magrittr)
+library(dplyr)
+
+setwd("/Users/rebeccanoel/Desktop/FinalProject")
+```
+
+
+```{r}
+#Loading Data
+control_counts<-CreateSeuratObject(Read10X_h5("GSM4216339_C.h5"),project='control') #control (unsonicated) cells
+exp_counts<-CreateSeuratObject(Read10X_h5("GSM4216342_4MPA.h5"),project = 'FUS') #0.4 MPa FUS
+```
+
+```{r}
+exp_counts
+```
+```{r}
+combined_counts=merge(control_counts,y=exp_counts, add.cell.ids = c("control","FUS"),project='all')
+```
+
+```{r}
+head(colnames(combined_counts))
+```
+```{r}
+table(combined_counts$orig.ident)
+```
+
+
+```{r}
+#Calculating % mitochondrial DNA for merged data
+mito.genes <- grep(pattern = "^mt-", x = rownames(combined_counts@assays[["RNA"]]), value = TRUE)
+percent.mito <- Matrix::colSums(combined_counts@assays[["RNA"]][mito.genes,])/Matrix::colSums(combined_counts@assays[["RNA"]])
+
+#in case the above function does not work simply do:
+combined_counts$percent.mito <- percent.mito
+
+```
+
+
+```{r}
+#Plotting result
+VlnPlot(object = combined_counts, features = c("nFeature_RNA", "nCount_RNA", "percent.mito"), ncol = 3)
+```
+
+
+```{r}
+#Filter out genes with <200 features, >2500 features, and >50% mitochondrial RNA (-Inf as lower limit eliminates any lower limit)
+combined_counts <- subset(x = combined_counts, subset = nFeature_RNA > 200 & nFeature_RNA < 2500 & percent.mito >  -Inf & percent.mito < 5 ) #really low yield with 0.05 so increased to 5...this is just a limitation of the dataset quality
+
+```
+
+```{r}
+#Plotting again to check new counts
+
+VlnPlot(object = combined_counts, features = c("nFeature_RNA", "nCount_RNA", "percent.mito"), ncol = 3)
+
+```
+
+```{r}
+#normalizing by total expression
+
+combined_counts <- NormalizeData(object = combined_counts, normalization.method = "LogNormalize", scale.factor = 10000)
+
+```
+
+```{r}
+# Variable gene detection
+
+combined_counts <- FindVariableFeatures(object = combined_counts, mean.function = ExpMean, dispersion.function = LogVMR, x.low.cutoff = 0.0125, x.high.cutoff = 3, y.cutoff = 0.5, nfeatures = 2000)
+
+head(x = HVFInfo(object = combined_counts))
+```
+
+
+```{r}
+#scaling data & removing unwanted variation
+combined_counts <- ScaleData(object = combined_counts, vars.to.regress = c("nCounts_RNA", "percent.mito"))
+
+```
+
+```{r}
+#PCA
+
+combined_counts <- RunPCA(object = combined_counts,  npcs = 30, verbose = TRUE) #verbose = TRUE prints top genes associated with high/low loadings for PCs 
+
+DimPlot(object = combined_counts, reduction = "pca")
+
+```
+
+
+```{r}
+#calculate k-nearest neighbors
+combined_counts <- FindNeighbors(combined_counts, reduction = "pca", dims = 1:20)
+
+combined_counts <- FindClusters(combined_counts, resolution = 0.5, algorithm = 1)
+
+
+```
+
+
+```{r}
+#Nonlinear dimension reduction 
+combined_counts <- RunTSNE(object = combined_counts, dims.use = 1:10, do.fast = TRUE)
+
+DimPlot(object = combined_counts, reduction = "tsne")
+```
+
+
+```{r}
+#UMAP
+combined_counts <- RunUMAP(combined_counts, reduction = "pca", dims = 1:20)
+DimPlot(combined_counts, reduction = "umap", split.by = "seurat_clusters")
+```
+
+
+```{r}
+#save data
+saveRDS(combined_counts, file="/Users/rebeccanoel/Desktop/FinalProject/combined.rds")
+```
+
+```{r}
+#ID  cluster 1 markers
+cluster1.markers <- FindMarkers(object = combined_counts, ident.1 = 1, min.pct = 0.25)
+print(x = head(x = cluster1.markers, n = 5))
+```
+
+
+```{r}
+#Finding markers for every cluster compared to every other cell
+
+combined_counts.markers <- FindAllMarkers(object = combined_counts, only.pos = TRUE, min.pct = 0.25, thresh.use = 0.25)
+
+combined_counts.markers %>% group_by(cluster) %>% top_n(10, avg_log2FC) #avg_log2FC works but avg_logFC doesn't 
+
+#we look here for large differences in pct.1 and pct.2
+
+```
+
+
+```{r}
+#replot umaps as a reminder
+
+DimPlot(combined_counts,reduction='umap')
+```
+
+
+```{r}
+
+# interested in microglia 
+
+FeaturePlot(combined_counts,features = c("Tmem119","Cx3cr1","Hexb"))
+```
+
+```{r}
+# interested in astrocytes 
+
+FeaturePlot(combined_counts,features = c("Gfap","S100b","Astn1"))
+
+```
+
+```{r}
+#expression heatmap
+#control_top10 <-control_counts.markers %>% group_by(cluster) %>% top_n(10, avg_log2FC) #expression heatmaps for control and experimental clusters
+#DoHeatmap(object=control_counts,features=control_top10$gene,label=TRUE)
+
+```
+
+```{r}
+#interested in microglia and astrocyte populations so probe these canonical markers to distinguish in umap
+#some microglia canonical markers: Cx3cr1, Cd11b, Cd45, CCr2, Tmem119, Hexb
+#some astrocyte canonical markers: Aldh1L1, AldoC, Glt1, S100b, NDRG2, GFAP
+
+
+VlnPlot(combined_counts, features=c("Cx3cr1","Tmem119","Hexb")) #microglia exp
+
+```
+
+```{r}
+#astrocyte canonical markers
+
+VlnPlot(combined_counts, features=c("Gfap","S100b","Astn1")) #astrocyte exp
+#this analysis reveals clusters 2 and 6 as the astrocyte clusters
+```
+
+```{r}
+#subset microglia clusters based on above violin plots
+combined_counts_MG <-subset(combined_counts,idents = c(0,1,4,5))
+combined_counts_def_MG <-subset(combined_counts,idents = 5)
+```
+
+```{r}
+#subset astrocyte clusters based on above violin plots
+combined_counts_Astro <-subset(combined_counts,idents = c(2,6))
+
+```
+
+
+```{r}
+#from this analysis, identify that microglia are likely represented by clusters 0,1,4 and 5
+#find differentially expressed markers in these microglia clusters
+clusterMG.markers <-FindMarkers(combined_counts_MG,ident.1="FUS", group.by='orig.ident',min.pct = 0.25)
+head(clusterMG.markers,n=40)
+```
+
+```{r}
+clusterAstro.markers <-FindMarkers(combined_counts_Astro,ident.1="FUS", group.by='orig.ident',min.pct = 0.25)
+head(clusterAstro.markers,n=40)
+
+```
+
+
+```{r}
+library(httr)
+library(data.table)
+library(limma)
+
+GENE_SYM_ID_LINK_BASE <- "https://www.genenames.org/cgi-bin/download/custom?col=gd_app_sym&col=gd_pub_eg_id&status=Approved&hgnc_dbtag=on&order_by=gd_app_sym_sort&format=text&submit=submit"
+response <- GET(GENE_SYM_ID_LINK_BASE)
+gene_sym_id <- data.frame(fread(text=httr::content(response, "parsed"), header=TRUE))
+colnames(gene_sym_id) <- c("gene_symbol","gene_id")
+
+gene_sym_id <- gene_sym_id[apply(gene_sym_id == "", 1, sum) == 0,]
+gene_sym_id <- gene_sym_id[apply(is.na(gene_sym_id), 1, sum) == 0,]
+
+gene_sym_id <- gene_sym_id[!duplicated(gene_sym_id$gene_id), ]
+rownames(gene_sym_id) <- gene_sym_id$gene_symbol
+```
+
+```{r}
+go_res <- goana(rownames(clusterMG.markers), geneid=gene_sym_id[rownames(clusterMG.markers), "gene_id"])
+topGO(go_res)
+```
+
+```{r}
+go_res_astro <- goana(rownames(clusterAstro.markers), geneid=gene_sym_id[rownames(clusterAstro.markers), "gene_id"])
+topGO(go_res_astro)
+
+```
+
+
+
+
